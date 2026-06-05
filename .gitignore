@@ -1,2 +1,5 @@
 datasets/*
 *.npy
+models/
+*.bin
+*.safetensors

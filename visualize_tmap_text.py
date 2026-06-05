@@ -91,7 +91,7 @@ def create_professional_colormap():
     return LinearSegmentedColormap.from_list('professional', colors, N=256)
 
 
-def visualize_token_ablation(img, caption, token_words, t_saliency, 
+def visualize_token_ablation(img, caption, token_words, t_saliency,
                             similarities, ratios, title=None):
     tmap = np.array(t_saliency[1:-1])
     words = [str(w).split('<')[0].strip() for w in token_words[1:-1]]
@@ -100,13 +100,13 @@ def visualize_token_ablation(img, caption, token_words, t_saliency,
     tmap = tmap[:valid_len]
 
     sorted_indices = np.argsort(tmap)[::-1]
-    
+
     fig = plt.figure(figsize=(14, 8))
     fig.patch.set_facecolor('white')
 
     gs = fig.add_gridspec(2, 2, height_ratios=[1, 1.2], width_ratios=[1, 1.2],
-                          hspace=0.25, wspace=0.2,
-                          left=0.05, right=0.95, top=0.92, bottom=0.15)
+                          hspace=0.30, wspace=0.25,
+                          left=0.06, right=0.94, top=0.90, bottom=0.12)
 
     ax_img = fig.add_subplot(gs[0, 0])
     ax_img.imshow(img)
@@ -119,59 +119,27 @@ def visualize_token_ablation(img, caption, token_words, t_saliency,
     norm_tmap = (tmap - tmap.min()) / (tmap.max() - tmap.min() + 1e-8)
 
     ax_tokens = fig.add_subplot(gs[0, 1])
-    ax_tokens.set_title('(b) Token Importance (T-Map)', fontsize=12, fontweight='bold', pad=8)
-    ax_tokens.axis('off')
+    ax_tokens.set_title('(b) Token Importance Ranking (T-Map)', fontsize=12, fontweight='bold', pad=8)
 
-    # 准备按重要性排序的单词和分数
     sorted_words = [words[idx] for idx in sorted_indices]
     sorted_scores = [tmap[idx] for idx in sorted_indices]
     sorted_colors = [cmap(norm_tmap[idx]) for idx in sorted_indices]
 
-    # 使用合适的布局，避免重叠
-    max_chars_per_line = 30
-    line_height = 0.35
-    start_y = 0.75
-    start_x = 0.02
+    y_pos = np.arange(len(sorted_words))
 
-    current_line = []
-    current_line_chars = 0
-    current_y = start_y
+    bars = ax_tokens.barh(y_pos, sorted_scores, color=sorted_colors,
+                          edgecolor='navy', linewidth=0.5, height=0.6)
+    ax_tokens.set_yticks(y_pos)
+    ax_tokens.set_yticklabels(sorted_words, fontsize=10, fontweight='bold')
+    ax_tokens.invert_yaxis()
+    ax_tokens.set_xlabel('Importance Score', fontsize=10)
+    ax_tokens.set_xlim(0, max(sorted_scores) * 1.15)
+    ax_tokens.grid(True, alpha=0.3, axis='x')
 
-    for word, score, color in zip(sorted_words, sorted_scores, sorted_colors):
-        word_length = len(word)
-        if current_line_chars + word_length + 2 > max_chars_per_line and current_line:
-            # 绘制当前行
-            line_x = start_x
-            for w, s, c in current_line:
-                ax_tokens.text(line_x, current_y, w, fontsize=11, fontweight='bold',
-                              va='center', ha='left',
-                              bbox=dict(boxstyle='round,pad=0.2', facecolor=c,
-                                       edgecolor='navy', linewidth=0.5, alpha=0.9))
-                ax_tokens.text(line_x, current_y - 0.12, f'{s:.3f}', fontsize=9,
-                              va='center', ha='left', color='gray')
-                line_x += len(w) * 0.03 + 0.03
-            
-            current_line = []
-            current_line_chars = 0
-            current_y -= line_height
-            
-            if current_y < 0.1:
-                break
-        
-        current_line.append((word, score, color))
-        current_line_chars += word_length + 2  # +2 for space
-    
-    # 绘制最后一行
-    if current_line:
-        line_x = start_x
-        for w, s, c in current_line:
-            ax_tokens.text(line_x, current_y, w, fontsize=11, fontweight='bold',
-                          va='center', ha='left',
-                          bbox=dict(boxstyle='round,pad=0.2', facecolor=c,
-                                   edgecolor='navy', linewidth=0.5, alpha=0.9))
-            ax_tokens.text(line_x, current_y - 0.12, f'{s:.3f}', fontsize=9,
-                          va='center', ha='left', color='gray')
-            line_x += len(w) * 0.03 + 0.03
+    for i, (score, color) in enumerate(zip(sorted_scores, sorted_colors)):
+        ax_tokens.text(score + 0.01, i, f'{score:.3f}',
+                      va='center', ha='left', fontsize=9,
+                      fontweight='bold', color='darkblue')
 
     ax_curve = fig.add_subplot(gs[1, 0])
     ax_curve.plot(ratios, similarities, 'o-', linewidth=3, markersize=8,
@@ -190,9 +158,9 @@ def visualize_token_ablation(img, caption, token_words, t_saliency,
 
     ax_bar = fig.add_subplot(gs[1, 1])
     bar_colors = plt.cm.RdYlGn_r(np.array(similarities) / max(similarities))
-    bars = ax_bar.bar(np.arange(len(similarities)), similarities, 
+    bars = ax_bar.bar(np.arange(len(similarities)), similarities,
                       color=bar_colors, edgecolor='black')
-    
+
     ax_bar.set_xticks(np.arange(len(similarities)))
     ax_bar.set_xticklabels([f'{int(r*100)}%' for r in ratios], rotation=45, fontsize=9)
     ax_bar.set_xlabel('Tokens Kept', fontsize=11)
@@ -207,8 +175,8 @@ def visualize_token_ablation(img, caption, token_words, t_saliency,
     stats_text = (f'Token Ablation Statistics | Original={original_sim:.4f} | '
                   f'Max Drop={max_drop:.4f} ({drop_ratio:.1f}%) | '
                   f'Critical Point={ratios[critical_point]:.2f}')
-    
-    stats_ax = fig.add_axes([0.05, 0.08, 0.9, 0.05])
+
+    stats_ax = fig.add_axes([0.05, 0.02, 0.9, 0.05])
     stats_ax.axis('off')
     stats_ax.text(0.5, 0.5, stats_text, fontsize=10, ha='center', va='center',
                   fontweight='bold', color='darkblue',
