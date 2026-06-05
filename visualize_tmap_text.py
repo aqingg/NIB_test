@@ -1,60 +1,35 @@
 """
-方案二：文本Token重要性可视化 (T-Map Text)
-============================================
+方案二：词级消融实验 (Token-level Ablation Study)
+=============================================
 
 功能说明：
-    将NIB方法生成的文本Token重要性分数(T-Map)以可视化方式展示，
-    通过颜色编码显示每个词对图像-文本匹配的重要程度。
+    通过词级消融实验验证NIB识别的文本Token重要性是否真正影响CLIP的决策。
+    将NIB识别的高分词删除/替换，观察CLIP图文相似度变化，证明NIB的可解释性。
+
+实验设计：
+    1. 使用NIB生成文本Token重要性分数(T-Map)
+    2. 按重要性排序Token
+    3. 依次删除最不重要的Token（用[MASK]替换）
+    4. 每次删除后重新计算CLIP相似度
+    5. 如果NIB有效，删除重要词时相似度会显著下降
 
 使用方法：
     python visualize_tmap_text.py [选项]
 
 常用选项：
     --num_samples N       生成N张可视化图像（默认：5）
-    --output_dir PATH     输出目录（默认：outputs/tmap_text）
+    --output_dir PATH     输出目录（默认：outputs/tmap_ablation）
     --num_steps N         NIB优化步数（默认：10）
     --target_layer N      目标层索引（默认：9）
-    --data_root PATH      数据集根目录（默认：datasets）
-    --ann_path PATH       标注文件路径（默认：datasets/en_val.json）
-    --clip_path PATH      CLIP模型路径（默认：环境变量或models/clip-vit-base-patch32）
-    --viz_type TYPE       可视化类型：combined/heatmap/both（默认：combined）
-    --fontsize N          文本字体大小（默认：14）
-
-可视化类型说明：
-    combined  - 上下布局：上方为重要性排名条形图，下方为Caption着色展示（默认）
-    heatmap  - 纯横向条形图：每个Token及其重要性分数
-    both     - 同时生成两种类型
 
 示例：
-    # 基本用法：生成5张文本可视化（combined模式）
-    python visualize_tmap_text.py --num_samples 5
-
-    # 生成两种可视化类型
-    python visualize_tmap_text.py --num_samples 5 --viz_type both
-
-    # 调整字体大小
-    python visualize_tmap_text.py --num_samples 5 --fontsize 18
-
-    # 修改NIB参数
-    python visualize_tmap_text.py --num_samples 5 --num_steps 20 --target_layer 9
+    python visualize_tmap_text.py --num_samples 3
 
 输出文件：
-    outputs/tmap_text/
-    ├── tmap_text_0001_combined.png    # Combined模式（综合可视化）
-    ├── tmap_text_0001_heatmap.png     # Heatmap模式（纯排名图）
+    outputs/tmap_ablation/
+    ├── tmap_ablation_0001.png
+    ├── tmap_ablation_0002.png
     └── ...
-
-可视化说明：
-    - 重要性分数越高，颜色越深（蓝色渐变）
-    - 最重要的词会加粗并增大字体
-    - 每个词下方标注具体的重要性分数
-    - 颜色条图例显示分数与颜色的对应关系
-
-依赖：
-    - CLIP模型（openai/clip-vit-base-patch32或本地路径）
-    - Flickr8k数据集
-    - salicncy.nib (NIB显著性方法)
-    - matplotlib (可视化绘图)
 """
 
 import argparse
@@ -69,7 +44,6 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
-import cv2
 
 from datasets import Flickr8kDataset, collate_fn_flickr8k
 from salicncy import nib
@@ -112,154 +86,137 @@ def extract_image_features(model, pixel_values):
     raise TypeError(f"Unsupported image feature output type: {type(outputs)}")
 
 
-def create_importance_colormap():
-    colors = ['#f7fbff', '#deebf7', '#c6dbef', '#9ecae1', '#6baed6', 
-              '#4292c6', '#2171b5', '#08519c', '#08306b']
-    return LinearSegmentedColormap.from_list('importance', colors)
+def create_professional_colormap():
+    colors = ['#000080', '#0000FF', '#00FFFF', '#FFFF00', '#FF8000', '#FF0000']
+    return LinearSegmentedColormap.from_list('professional', colors, N=256)
 
 
-def visualize_text_importance(tmap, token_words, title=None, figsize=(14, 6), fontsize=14):
-    tmap = np.array(tmap[1:-1])
-    token_words = [str(x).split('<')[0].strip() for x in token_words[1:-1]]
-    
-    valid_len = min(len(token_words), len(tmap))
-    token_words = token_words[:valid_len]
+def visualize_token_ablation(img, caption, token_words, t_saliency, 
+                            similarities, ratios, title=None):
+    tmap = np.array(t_saliency[1:-1])
+    words = [str(w).split('<')[0].strip() for w in token_words[1:-1]]
+    valid_len = min(len(words), len(tmap))
+    words = words[:valid_len]
     tmap = tmap[:valid_len]
 
-    if len(token_words) == 0:
-        return
-
     sorted_indices = np.argsort(tmap)[::-1]
-    top_idx = sorted_indices[0]
     
-    fig, axes = plt.subplots(2, 1, figsize=figsize, gridspec_kw={'height_ratios': [1, 2]})
+    fig = plt.figure(figsize=(14, 8))
     fig.patch.set_facecolor('white')
-    
-    cmap = create_importance_colormap()
-    norm_scores = (tmap - tmap.min()) / (tmap.max() - tmap.min() + 1e-8)
-    
-    ax2 = axes[0]
-    ax2.set_xlim(0, 1)
-    ax2.set_ylim(0, 1)
-    ax2.axis('off')
-    ax2.set_title('Token Importance Distribution', fontsize=fontsize, fontweight='bold', pad=10)
-    
-    bar_height = 0.15
-    max_bars = 10
-    show_indices = sorted_indices[:max_bars] if len(sorted_indices) > max_bars else sorted_indices
-    
-    for i, idx in enumerate(show_indices):
-        y_pos = 0.8 - i * (0.7 / max_bars)
-        score = tmap[idx]
-        color = cmap(norm_scores[idx])
-        width = norm_scores[idx]
-        
-        rect = mpatches.FancyBboxPatch((0, y_pos - bar_height/2), width * 0.95, bar_height,
-                                        boxstyle="round,pad=0.01", facecolor=color, 
-                                        edgecolor='darkblue', linewidth=0.5)
-        ax2.add_patch(rect)
-        
-        ax2.text(0.02, y_pos, f'{token_words[idx]}: {score:.4f}', 
-                fontsize=fontsize-2, va='center', ha='left', fontweight='bold')
-        ax2.text(width * 0.95 + 0.02, y_pos, f'{score:.3f}', 
-                fontsize=fontsize-3, va='center', ha='left', color='gray')
-    
-    ax2.set_xlim(0, 1)
-    ax2.set_ylim(0, 1)
 
-    ax1 = axes[1]
-    ax1.set_title('Caption with Token Importance', fontsize=fontsize, fontweight='bold', pad=10)
-    
-    x_pos = 0.02
-    y_pos = 0.5
-    max_x = 0.95
-    line_height = 0.22
-    current_y = y_pos
-    
-    for i, (word, score) in enumerate(zip(token_words, tmap)):
-        color = cmap(norm_scores[i])
-        
-        if i == top_idx:
-            fontweight = 'bold'
-            fontsize_display = fontsize + 2
-        else:
-            fontweight = 'normal'
-            fontsize_display = fontsize
-        
-        ax1.text(x_pos, current_y, word, fontsize=fontsize_display, 
-                fontweight=fontweight, va='center', ha='left',
-                bbox=dict(boxstyle='round,pad=0.3', facecolor=color, 
-                         edgecolor='navy', linewidth=0.8, alpha=0.85),
-                transform=ax1.transAxes)
-        
-        x_pos += len(word) * 0.025 + 0.03
-        
-        if x_pos > max_x and i < len(token_words) - 1:
-            x_pos = 0.02
+    gs = fig.add_gridspec(2, 2, height_ratios=[1, 1.2], width_ratios=[1, 1.2],
+                          hspace=0.25, wspace=0.2,
+                          left=0.05, right=0.95, top=0.92, bottom=0.15)
+
+    ax_img = fig.add_subplot(gs[0, 0])
+    ax_img.imshow(img)
+    ax_img.set_title('(a) Input Image', fontsize=12, fontweight='bold', pad=8)
+    ax_img.axis('off')
+    for spine in ax_img.spines.values():
+        spine.set_linewidth(1.5)
+
+    cmap = create_professional_colormap()
+    norm_tmap = (tmap - tmap.min()) / (tmap.max() - tmap.min() + 1e-8)
+
+    ax_tokens = fig.add_subplot(gs[0, 1])
+    ax_tokens.set_title('(b) Token Importance (T-Map)', fontsize=12, fontweight='bold', pad=8)
+    ax_tokens.axis('off')
+
+    # 准备按重要性排序的单词和分数
+    sorted_words = [words[idx] for idx in sorted_indices]
+    sorted_scores = [tmap[idx] for idx in sorted_indices]
+    sorted_colors = [cmap(norm_tmap[idx]) for idx in sorted_indices]
+
+    # 使用合适的布局，避免重叠
+    max_chars_per_line = 30
+    line_height = 0.35
+    start_y = 0.75
+    start_x = 0.02
+
+    current_line = []
+    current_line_chars = 0
+    current_y = start_y
+
+    for word, score, color in zip(sorted_words, sorted_scores, sorted_colors):
+        word_length = len(word)
+        if current_line_chars + word_length + 2 > max_chars_per_line and current_line:
+            # 绘制当前行
+            line_x = start_x
+            for w, s, c in current_line:
+                ax_tokens.text(line_x, current_y, w, fontsize=11, fontweight='bold',
+                              va='center', ha='left',
+                              bbox=dict(boxstyle='round,pad=0.2', facecolor=c,
+                                       edgecolor='navy', linewidth=0.5, alpha=0.9))
+                ax_tokens.text(line_x, current_y - 0.12, f'{s:.3f}', fontsize=9,
+                              va='center', ha='left', color='gray')
+                line_x += len(w) * 0.03 + 0.03
+            
+            current_line = []
+            current_line_chars = 0
             current_y -= line_height
-    
-    ax1.set_xlim(0, 1)
-    ax1.set_ylim(-0.1, 1)
-    ax1.axis('off')
-    
-    cax = fig.add_axes([0.92, 0.15, 0.02, 0.35])
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=tmap.min(), vmax=tmap.max()))
-    sm.set_array([])
-    cbar = plt.colorbar(sm, cax=cax)
-    cbar.set_label('Importance Score', fontsize=fontsize-2)
-    
-    plt.tight_layout(rect=[0, 0, 0.9, 1])
-    
-    if title:
-        plt.savefig(title, bbox_inches='tight', dpi=150, facecolor='white', edgecolor='none')
-        plt.close()
-    else:
-        plt.show()
-
-
-def visualize_text_heatmap_vertical(token_words, scores, title=None, figsize=(10, 8)):
-    token_words = [str(x).split('<')[0].strip() for x in token_words[1:-1]]
-    scores = np.array(scores[1:-1])
-    
-    valid_len = min(len(token_words), len(scores))
-    token_words = token_words[:valid_len]
-    scores = scores[:valid_len]
-    
-    if len(token_words) == 0:
-        return
-    
-    fig, ax = plt.subplots(figsize=figsize)
-    fig.patch.set_facecolor('white')
-    
-    n_tokens = len(token_words)
-    
-    cmap = plt.cm.RdYlGn_r
-    norm = plt.Normalize(vmin=scores.min(), vmax=scores.max())
-    
-    for i, (word, score) in enumerate(zip(token_words, scores)):
-        color = cmap(norm(score))
+            
+            if current_y < 0.1:
+                break
         
-        ax.barh(i, score, color=color, edgecolor='black', linewidth=0.5, height=0.7)
-        
-        ax.text(-0.02, i, word, fontsize=12, va='center', ha='right', fontweight='bold')
-        ax.text(score + 0.01, i, f'{score:.3f}', fontsize=10, va='center', ha='left', color='gray')
+        current_line.append((word, score, color))
+        current_line_chars += word_length + 2  # +2 for space
     
-    ax.set_yticks(range(n_tokens))
-    ax.set_yticklabels([])
-    ax.set_xlabel('Importance Score', fontsize=12)
-    ax.set_title('Text Token Importance Analysis', fontsize=14, fontweight='bold', pad=15)
-    ax.set_xlim(-0.1, scores.max() * 1.3)
-    ax.invert_yaxis()
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    # 绘制最后一行
+    if current_line:
+        line_x = start_x
+        for w, s, c in current_line:
+            ax_tokens.text(line_x, current_y, w, fontsize=11, fontweight='bold',
+                          va='center', ha='left',
+                          bbox=dict(boxstyle='round,pad=0.2', facecolor=c,
+                                   edgecolor='navy', linewidth=0.5, alpha=0.9))
+            ax_tokens.text(line_x, current_y - 0.12, f'{s:.3f}', fontsize=9,
+                          va='center', ha='left', color='gray')
+            line_x += len(w) * 0.03 + 0.03
+
+    ax_curve = fig.add_subplot(gs[1, 0])
+    ax_curve.plot(ratios, similarities, 'o-', linewidth=3, markersize=8,
+                  color='#2171b5', markerfacecolor='#6baed6')
+
+    critical_point = np.argmax(np.diff(similarities))
+    ax_curve.axvline(ratios[critical_point], color='red', linestyle='--',
+                     label=f'Critical: {ratios[critical_point]:.2f}')
+
+    ax_curve.set_xlabel('Tokens Kept (%)', fontsize=11)
+    ax_curve.set_ylabel('CLIP Similarity', fontsize=11)
+    ax_curve.set_title('(c) Ablation Curve', fontsize=12, fontweight='bold', pad=8)
+    ax_curve.grid(True, alpha=0.3)
+    ax_curve.legend()
+    ax_curve.set_xlim(-0.02, 1.02)
+
+    ax_bar = fig.add_subplot(gs[1, 1])
+    bar_colors = plt.cm.RdYlGn_r(np.array(similarities) / max(similarities))
+    bars = ax_bar.bar(np.arange(len(similarities)), similarities, 
+                      color=bar_colors, edgecolor='black')
     
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, pad=0.02)
-    cbar.set_label('Importance', fontsize=11)
+    ax_bar.set_xticks(np.arange(len(similarities)))
+    ax_bar.set_xticklabels([f'{int(r*100)}%' for r in ratios], rotation=45, fontsize=9)
+    ax_bar.set_xlabel('Tokens Kept', fontsize=11)
+    ax_bar.set_ylabel('Similarity', fontsize=11)
+    ax_bar.set_title('(d) Ablation Bar Chart', fontsize=12, fontweight='bold', pad=8)
+    ax_bar.grid(True, alpha=0.3, axis='y')
+
+    original_sim = similarities[-1]
+    max_drop = original_sim - min(similarities)
+    drop_ratio = (max_drop / original_sim) * 100
+
+    stats_text = (f'Token Ablation Statistics | Original={original_sim:.4f} | '
+                  f'Max Drop={max_drop:.4f} ({drop_ratio:.1f}%) | '
+                  f'Critical Point={ratios[critical_point]:.2f}')
     
-    plt.tight_layout()
-    
+    stats_ax = fig.add_axes([0.05, 0.08, 0.9, 0.05])
+    stats_ax.axis('off')
+    stats_ax.text(0.5, 0.5, stats_text, fontsize=10, ha='center', va='center',
+                  fontweight='bold', color='darkblue',
+                  bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', edgecolor='orange'))
+
+    fig.suptitle(f'Token-Level Ablation Study\nOriginal Caption: "{caption}"',
+                fontsize=14, fontweight='bold', y=0.98)
+
     if title:
         plt.savefig(title, bbox_inches='tight', dpi=150, facecolor='white')
         plt.close()
@@ -268,17 +225,14 @@ def visualize_text_heatmap_vertical(token_words, scores, title=None, figsize=(10
 
 
 def main():
-    argparser = argparse.ArgumentParser(description="Generate enhanced text token saliency visualizations using NIB")
-    argparser.add_argument("--num_samples", type=int, default=5, help="Number of samples to visualize")
-    argparser.add_argument("--output_dir", type=str, default="outputs/tmap_text", help="Output directory")
-    argparser.add_argument("--num_steps", type=int, default=10, help="Number of NIB optimization steps")
-    argparser.add_argument("--target_layer", type=int, default=9, help="Target layer for NIB")
-    argparser.add_argument("--data_root", type=str, default="datasets", help="Dataset root directory")
-    argparser.add_argument("--ann_path", type=str, default="datasets/en_val.json", help="Annotation file path")
-    argparser.add_argument("--clip_path", type=str, default=None, help="Path to local CLIP model")
-    argparser.add_argument("--viz_type", type=str, default="combined", choices=["combined", "heatmap", "both"],
-                          help="Visualization type: combined (box+bar), heatmap (bar only), or both")
-    argparser.add_argument("--fontsize", type=int, default=14, help="Font size for text tokens")
+    argparser = argparse.ArgumentParser(description="Token-level ablation study for NIB")
+    argparser.add_argument("--num_samples", type=int, default=3)
+    argparser.add_argument("--output_dir", type=str, default="outputs/tmap_ablation")
+    argparser.add_argument("--num_steps", type=int, default=10)
+    argparser.add_argument("--target_layer", type=int, default=9)
+    argparser.add_argument("--data_root", type=str, default="datasets")
+    argparser.add_argument("--ann_path", type=str, default="datasets/en_val.json")
+    argparser.add_argument("--clip_path", type=str, default=None)
     args = argparser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -286,26 +240,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    if args.clip_path:
-        clip_path = args.clip_path
-    else:
-        clip_path = os.environ.get("CLIP_PATH", r"D:\NIB-main\models\clip-vit-base-patch32")
-
+    clip_path = args.clip_path if args.clip_path else os.environ.get("CLIP_PATH", r"D:\NIB-main\models\clip-vit-base-patch32")
     print(f"Loading CLIP model from: {clip_path}")
     model, processor, tokenizer = load_clip_local(clip_path, device)
 
     print("Loading Flickr8k dataset...")
     dataset = Flickr8kDataset(args.data_root, args.ann_path, image_preprocessor=processor)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=True,
-        collate_fn=collate_fn_flickr8k,
-    )
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=collate_fn_flickr8k)
 
     model.eval()
 
-    print(f"\nGenerating {args.num_samples} text saliency visualizations...")
+    print(f"\nGenerating {args.num_samples} token ablation visualizations...")
     count = 0
     for imgs, texts, batch_xs in tqdm(dataloader, total=args.num_samples):
         if count >= args.num_samples:
@@ -320,53 +265,73 @@ def main():
 
         with torch.no_grad():
             im_feature = extract_image_features(model, batch_xs)
+            im_feature_norm = im_feature / im_feature.norm(dim=-1, keepdim=True)
             for caption in captions:
                 tid = torch.tensor([tokenizer.encode(caption, add_special_tokens=True)]).to(device)
                 tf = extract_text_features(model, tid)
-                sim = torch.nn.functional.cosine_similarity(im_feature, tf).item()
+                tf_norm = tf / tf.norm(dim=-1, keepdim=True)
+                sim = torch.nn.functional.cosine_similarity(im_feature_norm, tf_norm).item()
                 if sim > best_sim:
                     best_sim = sim
                     best_caption = caption
 
         print(f"\nSample {count + 1}:")
-        print(f"  Best caption: {best_caption}")
-        print(f"  Similarity: {best_sim:.4f}")
+        print(f"  Caption: {best_caption}")
+        print(f"  Original Similarity: {best_sim:.4f}")
 
         tid = torch.tensor([tokenizer.encode(best_caption, add_special_tokens=True)]).to(device)
         _, t_saliency = nib(model, [tid], batch_xs, args.num_steps, args.target_layer)
 
         t_saliency = normalize(np.squeeze(t_saliency[0]))
-
         tokens = tokenizer.encode(best_caption, add_special_tokens=True)
         token_words = [tokenizer.decode([t]).strip() for t in tokens]
 
-        base_name = f"tmap_text_{count + 1:04d}"
+        tmap = np.array(t_saliency[1:-1])
+        words = [str(w).split('<')[0].strip() for w in token_words[1:-1]]
+        valid_len = min(len(words), len(tmap))
+        words = words[:valid_len]
+        tmap = tmap[:valid_len]
 
-        if args.viz_type in ["combined", "both"]:
-            output_path = os.path.join(args.output_dir, f"{base_name}_combined.png")
-            visualize_text_importance(
-                t_saliency,
-                token_words,
-                title=output_path,
-                fontsize=args.fontsize
-            )
-            print(f"  Saved combined: {output_path}")
+        sorted_indices = np.argsort(tmap)
 
-        if args.viz_type in ["heatmap", "both"]:
-            output_path = os.path.join(args.output_dir, f"{base_name}_heatmap.png")
-            visualize_text_heatmap_vertical(
-                token_words,
-                t_saliency,
-                title=output_path
-            )
-            print(f"  Saved heatmap: {output_path}")
+        num_tokens = len(words)
+        num_ablation = min(num_tokens, 8)
+        ratios = np.linspace(0.0, 1.0, num_ablation + 1)[::-1]
+        similarities = []
 
-        if args.viz_type == "both":
-            print(f"  (Both visualizations saved)")
+        for ratio in ratios:
+            num_to_keep = int(num_tokens * ratio)
+            kept_indices = sorted_indices[-num_to_keep:] if num_to_keep > 0 else []
+            
+            new_words = []
+            for i in range(num_tokens):
+                if i in kept_indices:
+                    new_words.append(words[i])
+                else:
+                    new_words.append('[MASK]')
+            
+            masked_caption = ' '.join(new_words)
+            
+            masked_tid = torch.tensor([tokenizer.encode(masked_caption, add_special_tokens=True)]).to(device)
+            masked_tf = extract_text_features(model, masked_tid)
+            # 归一化特征以确保余弦相似度在[-1, 1]范围内
+            im_feature_norm = im_feature / im_feature.norm(dim=-1, keepdim=True)
+            masked_tf_norm = masked_tf / masked_tf.norm(dim=-1, keepdim=True)
+            sim = torch.nn.functional.cosine_similarity(im_feature_norm, masked_tf_norm).item()
+            similarities.append(sim)
+
+        output_path = os.path.join(args.output_dir, f"tmap_ablation_{count + 1:04d}.png")
+        visualize_token_ablation(img, best_caption, token_words, t_saliency,
+                                similarities, ratios, title=output_path)
+
+        max_drop = best_sim - min(similarities)
+        drop_ratio = (max_drop / best_sim) * 100
+        print(f"  Max Similarity Drop: {max_drop:.4f} ({drop_ratio:.1f}%)")
+        print(f"  Saved: {output_path}")
 
         count += 1
 
-    print(f"\nDone. Saved {count} visualizations to '{args.output_dir}'.")
+    print(f"\nDone. Saved {count} token ablation visualizations to '{args.output_dir}'.")
 
 
 if __name__ == "__main__":
